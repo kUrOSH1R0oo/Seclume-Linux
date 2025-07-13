@@ -23,17 +23,25 @@
  * @param compression_level Compression level (0-9).
  * @param compression_algo Compression algorithm (COMPRESSION_ZLIB or COMPRESSION_LZMA).
  * @param comment Archive comment (NULL if none).
+ * @param outdir Output directory for extraction (NULL if none).
  * @param dry_run If 1, simulate archiving without writing to disk.
  * @param weak_password If 1, allow weak passwords.
+ * @param exclude_patterns Array of exclusion patterns (e.g., "*.log").
+ * @param exclude_pattern_count Number of exclusion patterns.
  * @return 0 on success, 1 on failure.
  */
 int archive_files(const char *output, const char **filenames, int file_count, const char *password,
-                 int force, int compression_level, CompressionAlgo compression_algo, const char *comment, int dry_run, int weak_password) {
+                 int force, int compression_level, CompressionAlgo compression_algo, const char *comment,
+                 const char *outdir, int dry_run, int weak_password, const char **exclude_patterns, int exclude_pattern_count) {
     if (!output || !filenames || !password || file_count <= 0 || file_count > MAX_FILES) {
         fprintf(stderr, "Error: Invalid archive parameters\n");
         return 1;
     }
     if (check_password_strength(password, weak_password) != 0) {
+        return 1;
+    }
+    if (outdir && (strlen(outdir) >= MAX_OUTDIR - AES_NONCE_SIZE - AES_TAG_SIZE || has_path_traversal(outdir))) {
+        fprintf(stderr, "Error: Invalid or too long output directory: %s\n", outdir);
         return 1;
     }
     if (!force && !dry_run && access(output, F_OK) == 0) {
@@ -71,9 +79,10 @@ int archive_files(const char *output, const char **filenames, int file_count, co
         if (out) fclose(out);
         return 1;
     }
-    ArchiveHeader header = { .magic = "SLM", .version = 5, .file_count = file_count,
+    size_t outdir_len = outdir ? strlen(outdir) : 0;
+    ArchiveHeader header = { .magic = "SLM", .version = 6, .file_count = file_count,
                             .compression_level = compression_level, .compression_algo = compression_algo,
-                            .comment_len = comment_len };
+                            .comment_len = comment_len, .outdir_len = outdir_len };
     memset(header.reserved, 0, sizeof(header.reserved));
     memcpy(header.salt, salt, SALT_SIZE);
     if (comment_len > 0) {
@@ -100,6 +109,30 @@ int archive_files(const char *output, const char **filenames, int file_count, co
     } else {
         memset(header.comment, 0, MAX_COMMENT);
     }
+    if (outdir_len > 0) {
+        uint8_t outdir_nonce[AES_NONCE_SIZE];
+        uint8_t outdir_tag[AES_TAG_SIZE];
+        if (RAND_bytes(outdir_nonce, AES_NONCE_SIZE) != 1) {
+            fprintf(stderr, "Error: Random number generation failed for outdir nonce\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            if (out) fclose(out);
+            return 1;
+        }
+        size_t enc_outdir_len;
+        if (encrypt_aes_gcm(meta_key, outdir_nonce, (uint8_t *)outdir, outdir_len,
+                            header.outdir, &enc_outdir_len, outdir_tag) != 0) {
+            fprintf(stderr, "Error: Failed to encrypt output directory\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            if (out) fclose(out);
+            return 1;
+        }
+        memcpy(header.outdir + enc_outdir_len, outdir_nonce, AES_NONCE_SIZE);
+        memcpy(header.outdir + enc_outdir_len + AES_NONCE_SIZE, outdir_tag, AES_TAG_SIZE);
+    } else {
+        memset(header.outdir, 0, MAX_OUTDIR);
+    }
     if (compute_hmac(file_key, (uint8_t *)&header, offsetof(ArchiveHeader, hmac), header.hmac) != 0) {
         secure_zero(file_key, AES_KEY_SIZE);
         secure_zero(meta_key, AES_KEY_SIZE);
@@ -113,8 +146,8 @@ int archive_files(const char *output, const char **filenames, int file_count, co
         fclose(out);
         return 1;
     }
-    verbose_print(VERBOSE_BASIC, "Wrote archive header (version 5, compression %s level %d, comment len %u)",
-                  compression_algo == COMPRESSION_ZLIB ? "zlib" : "LZMA", compression_level, comment_len);
+    verbose_print(VERBOSE_BASIC, "Wrote archive header (version 6, compression %s level %d, comment len %u, outdir len %u)",
+                  compression_algo == COMPRESSION_ZLIB ? "zlib" : "LZMA", compression_level, comment_len, outdir_len);
     for (int i = 0; i < file_count; i++) {
         const char *filename = filenames[i];
         if (!filename || strlen(filename) >= MAX_FILENAME || has_path_traversal(filename)) {

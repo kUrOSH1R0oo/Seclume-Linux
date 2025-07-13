@@ -15,10 +15,11 @@
  * @brief Extracts and decrypts files from a .slm archive.
  * @param archive Path to the input archive file (.slm).
  * @param password Password for decryption.
+ * @param outdir User-specified output directory (NULL to use archive's outdir or current directory).
  * @param force If 1, overwrite existing output files.
  * @return 0 on success, 1 on failure.
  */
-int extract_files(const char *archive, const char *password, int force) {
+int extract_files(const char *archive, const char *password, const char *outdir, int force) {
     if (!archive || !password) {
         fprintf(stderr, "Error: Invalid extract parameters\n");
         return 1;
@@ -35,8 +36,8 @@ int extract_files(const char *archive, const char *password, int force) {
         return 1;
     }
     CompressionAlgo algo;
-    if (strncmp(header.magic, "SLM", 4) != 0 || (header.version < 4 || header.version > 5)) {
-        fprintf(stderr, "Error: Invalid archive format or version (expected 4 or 5, got %d)\n", header.version);
+    if (strncmp(header.magic, "SLM", 4) != 0 || (header.version < 4 || header.version > 6)) {
+        fprintf(stderr, "Error: Invalid archive format or version (expected 4 to 6, got %d)\n", header.version);
         fclose(in);
         return 1;
     }
@@ -81,10 +82,99 @@ int extract_files(const char *archive, const char *password, int force) {
         return 1;
     }
     verbose_print(VERBOSE_DEBUG, "Verified header HMAC");
+    char *extract_dir = NULL;
+    if (outdir) {
+        extract_dir = strdup(outdir);
+        if (!extract_dir) {
+            fprintf(stderr, "Error: Memory allocation failed for output directory\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+    } else if (header.version >= 6 && header.outdir_len > 0) {
+        if (header.outdir_len > MAX_OUTDIR - AES_NONCE_SIZE - AES_TAG_SIZE) {
+            fprintf(stderr, "Error: Invalid output directory length (%u)\n", header.outdir_len);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        uint8_t *dec_outdir = malloc(header.outdir_len + 1);
+        if (!dec_outdir) {
+            fprintf(stderr, "Error: Memory allocation failed for output directory\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        size_t enc_outdir_len = header.outdir_len;
+        const uint8_t *outdir_nonce = header.outdir + enc_outdir_len;
+        const uint8_t *outdir_tag = outdir_nonce + AES_NONCE_SIZE;
+        size_t dec_len;
+        if (decrypt_aes_gcm(meta_key, outdir_nonce, header.outdir, enc_outdir_len, outdir_tag, dec_outdir, &dec_len) != 0) {
+            fprintf(stderr, "Error: Failed to decrypt output directory (possibly incorrect password)\n");
+            free(dec_outdir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        if (dec_len != header.outdir_len) {
+            fprintf(stderr, "Error: Decrypted output directory length mismatch (expected %u, got %lu)\n", header.outdir_len, dec_len);
+            free(dec_outdir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        dec_outdir[dec_len] = '\0';
+        if (has_path_traversal((char *)dec_outdir)) {
+            fprintf(stderr, "Error: Decrypted output directory contains path traversal\n");
+            free(dec_outdir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        extract_dir = (char *)dec_outdir;
+    } else {
+        extract_dir = strdup(".");
+        if (!extract_dir) {
+            fprintf(stderr, "Error: Memory allocation failed for current directory\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+    }
+    struct stat st;
+    if (stat(extract_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        verbose_print(VERBOSE_BASIC, "Output directory %s does not exist, falling back to current directory", extract_dir);
+        free(extract_dir);
+        extract_dir = strdup(".");
+        if (!extract_dir) {
+            fprintf(stderr, "Error: Memory allocation failed for current directory\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        if (stat(extract_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "Error: Current directory is not accessible\n");
+            free(extract_dir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+    }
+    verbose_print(VERBOSE_BASIC, "Extracting to directory: %s", extract_dir);
     for (uint32_t i = 0; i < header.file_count; i++) {
         FileEntry entry;
         if (fread(&entry, sizeof(entry), 1, in) != 1) {
             fprintf(stderr, "Error: Failed to read file entry %u\n", i);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -94,6 +184,7 @@ int extract_files(const char *archive, const char *password, int force) {
         size_t meta_dec_size;
         if (decrypt_aes_gcm(meta_key, entry.nonce, entry.encrypted_data, sizeof(entry.encrypted_data),
                             entry.tag, (uint8_t *)&plain_entry, &meta_dec_size) != 0) {
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -103,20 +194,35 @@ int extract_files(const char *archive, const char *password, int force) {
             has_path_traversal(plain_entry.filename) || plain_entry.compressed_size == 0 ||
             plain_entry.original_size == 0 || plain_entry.original_size > MAX_FILE_SIZE) {
             fprintf(stderr, "Error: Invalid or unsafe metadata in file entry %u\n", i);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
             return 1;
         }
-        verbose_print(VERBOSE_BASIC, "Extracting file: %s (permissions: 0%o)", plain_entry.filename, plain_entry.mode);
-        if (!force && access(plain_entry.filename, F_OK) == 0) {
-            fprintf(stderr, "Error: Output file %s exists. Use -f to overwrite.\n", plain_entry.filename);
+        size_t full_path_len = strlen(extract_dir) + strlen(plain_entry.filename) + 2;
+        char *full_path = malloc(full_path_len);
+        if (!full_path) {
+            fprintf(stderr, "Error: Memory allocation failed for file path\n");
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
             return 1;
         }
-        if (create_parent_dirs(plain_entry.filename) != 0) {
+        snprintf(full_path, full_path_len, "%s/%s", extract_dir, plain_entry.filename);
+        if (!force && access(full_path, F_OK) == 0) {
+            fprintf(stderr, "Error: Output file %s exists. Use -f to overwrite.\n", full_path);
+            free(full_path);
+            free(extract_dir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        if (create_parent_dirs(full_path) != 0) {
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -126,6 +232,8 @@ int extract_files(const char *archive, const char *password, int force) {
         uint8_t file_tag[AES_TAG_SIZE];
         if (fread(file_nonce, AES_NONCE_SIZE, 1, in) != 1 || fread(file_tag, AES_TAG_SIZE, 1, in) != 1) {
             fprintf(stderr, "Error: Failed to read nonce or tag for file %u\n", i);
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -134,6 +242,8 @@ int extract_files(const char *archive, const char *password, int force) {
         uint8_t *enc_buf = malloc(plain_entry.compressed_size);
         if (!enc_buf) {
             fprintf(stderr, "Error: Memory allocation failed for encrypted data\n");
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -145,6 +255,8 @@ int extract_files(const char *archive, const char *password, int force) {
             if (chunk == 0) {
                 fprintf(stderr, "Error: Failed to read encrypted data for file %u: %s\n", i, strerror(errno));
                 free(enc_buf);
+                free(full_path);
+                free(extract_dir);
                 secure_zero(file_key, AES_KEY_SIZE);
                 secure_zero(meta_key, AES_KEY_SIZE);
                 fclose(in);
@@ -156,6 +268,8 @@ int extract_files(const char *archive, const char *password, int force) {
         if (!comp_buf) {
             fprintf(stderr, "Error: Memory allocation failed for compressed data\n");
             free(enc_buf);
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -165,6 +279,8 @@ int extract_files(const char *archive, const char *password, int force) {
         if (decrypt_aes_gcm(file_key, file_nonce, enc_buf, plain_entry.compressed_size, file_tag, comp_buf, &comp_size) != 0) {
             free(enc_buf);
             free(comp_buf);
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -176,6 +292,8 @@ int extract_files(const char *archive, const char *password, int force) {
             fprintf(stderr, "Error: Memory allocation failed for decompressed data\n");
             free(enc_buf);
             free(comp_buf);
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -184,33 +302,39 @@ int extract_files(const char *archive, const char *password, int force) {
         size_t out_size = decompress_data(comp_buf, comp_size, out_buf, plain_entry.original_size, algo);
         if (out_size != plain_entry.original_size) {
             fprintf(stderr, "Error: Decompression failed for file %s (expected %lu bytes, got %lu)\n",
-                    plain_entry.filename, plain_entry.original_size, out_size);
+                    full_path, plain_entry.original_size, out_size);
             free(enc_buf);
             free(comp_buf);
             free(out_buf);
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
             return 1;
         }
         verbose_print(VERBOSE_DEBUG, "Decompressed to %lu bytes", out_size);
-        FILE *out = fopen(plain_entry.filename, "wb");
+        FILE *out = fopen(full_path, "wb");
         if (!out) {
-            fprintf(stderr, "Error: Cannot open output file %s: %s\n", plain_entry.filename, strerror(errno));
+            fprintf(stderr, "Error: Cannot open output file %s: %s\n", full_path, strerror(errno));
             free(enc_buf);
             free(comp_buf);
             free(out_buf);
+            free(full_path);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
             return 1;
         }
         if (fwrite(out_buf, 1, out_size, out) != out_size) {
-            fprintf(stderr, "Error: Failed to write output file %s: %s\n", plain_entry.filename, strerror(errno));
+            fprintf(stderr, "Error: Failed to write output file %s: %s\n", full_path, strerror(errno));
             free(enc_buf);
             free(comp_buf);
             free(out_buf);
+            free(full_path);
             fclose(out);
+            free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
@@ -218,17 +342,19 @@ int extract_files(const char *archive, const char *password, int force) {
         }
         fclose(out);
 #ifndef _WIN32
-        if (chmod(plain_entry.filename, plain_entry.mode) != 0) {
-            fprintf(stderr, "Warning: Failed to set permissions on %s: %s\n", plain_entry.filename, strerror(errno));
+        if (chmod(full_path, plain_entry.mode) != 0) {
+            fprintf(stderr, "Warning: Failed to set permissions on %s: %s\n", full_path, strerror(errno));
         } else {
-            verbose_print(VERBOSE_DEBUG, "Restored permissions on %s: 0%o", plain_entry.filename, plain_entry.mode);
+            verbose_print(VERBOSE_DEBUG, "Restored permissions on %s: 0%o", full_path, plain_entry.mode);
         }
 #endif
-        verbose_print(VERBOSE_BASIC, "Extracted file: %s", plain_entry.filename);
+        verbose_print(VERBOSE_BASIC, "Extracted file: %s", full_path);
         free(enc_buf);
         free(comp_buf);
         free(out_buf);
+        free(full_path);
     }
+    free(extract_dir);
     secure_zero(file_key, AES_KEY_SIZE);
     secure_zero(meta_key, AES_KEY_SIZE);
     fclose(in);

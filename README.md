@@ -52,6 +52,8 @@ Seclume provides the following key features:
 - **Verbose Logging**: Supports multiple verbosity levels (`-vv` for debug, default for basic progress, or none for errors only).
 - **Path Traversal Protection**: Prevents malicious filenames (e.g., containing `..`) from compromising security.
 - **Password Strength Checking**: Ignoring weak passwords to encourage secure usage. unless **--weak-password** is specified.
+- **User-Specified Directory Support**: Allows directing the archive or extracted files to different directories.
+- **File-Type Exclusion**: Allows setting exceptions for file types during the archiving process.
 
 ## Installation
 
@@ -140,6 +142,8 @@ seclume [options] <mode> <archive.slm> <password> [files...]
 | `-ca`, `--compression-algo (zlib, lzma)` | Set compression algorithm (default = lzma). | 
 | `-cl`, `--compression-level <0-9>` | Set compression level (0 = no, 9 = max, default = 1). |
 | `-wk`, `--weak-password` | Allow weak passwords in archive mode (NOT RECOMMENDED). |
+| `-o`, `--output-dir <dir>` | Specify output directory for extraction (archive/extract modes). |
+| `-x`, `--exclude <patterns>` | Comma-separated file patterns to exclude during archiving (e.g., *.log,*.txt). |
 
 ### Modes
 
@@ -160,7 +164,7 @@ seclume [options] archive <archive.slm> <password> <file1> [file2 ...]
   - Stores file permission.
   - Generates a random salt and nonces for encryption.
   - Computes an HMAC-SHA256 for the archive header.
-- **Options Supported**: `-f`, `-c`, `-d`, `-vv`, `-ca`, `-cl`, `-wk`.
+- **Options Supported**: `-f`, `-c`, `-d`, `-vv`, `-ca`, `-cl`, `-wk`, `-o`, `-x`.
 
 #### Extract Mode
 
@@ -178,7 +182,7 @@ seclume [options] extract <archive.slm> <password>
   - Decompresses file data using zlib|lzma.
   - Restores POSIX file permissions (Unix-like systems).
   - Creates parent directories as needed.
-- **Options Supported**: `-f`, `-vc`, `-vv`.
+- **Options Supported**: `-f`, `-vc`, `-vv`, `-o`.
 
 #### List Mode
 
@@ -266,6 +270,21 @@ seclume -vc list <archive.slm> <password>
    ```
 
    Forces Seclume to use a weak password.
+
+8. **Placing the archive file in a different directory**:
+
+   ```bash
+   seclume -o /path/to/directory archive output.slm mypassWORD123! file1.txt dir/
+   ```
+
+   The `.slm` file is generated in the same directory where you run Seclume. But, when extracting it, the extracted files will be placed in the directory you specify.
+
+9. **Excluding a specific file-type when archiving**:
+   ```bash
+   seclume -x *.log archive output.slm mypassWORD123! dir/
+   ```
+
+   It will skip all .log files when creating the archive.
 
 ## Security Features
 
@@ -504,7 +523,7 @@ Verbose mode (`-vv`) provides additional debug output, including timestamps and 
 
 Report bugs to **lone_kuroshiro@protonmail.com**. When reporting, include:
 
-- Seclume version (1.0.3).
+- Seclume version (1.0.5).
 - Steps to reproduce the issue.
 - Relevant error messages or logs (use `-vv` for detailed output).
 

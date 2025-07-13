@@ -32,6 +32,12 @@
 #define HMAC_SIZE 32
 /** @brief Maximum length of archive comment (including encryption overhead) */
 #define MAX_COMMENT 512
+/** @brief Maximum length of output directory path (including encryption overhead) */
+#define MAX_OUTDIR 256
+/** @brief Maximum number of exclusion patterns */
+#define MAX_EXCLUDE_PATTERNS 32
+/** @brief Maximum length of an exclusion pattern (including null terminator) */
+#define MAX_PATTERN_LEN 64
 
 /**
  * @brief Compression algorithm types.
@@ -46,7 +52,7 @@ typedef enum {
  */
 typedef struct {
     char magic[8];           /**< Magic string "SLM" identifying the archive format */
-    uint8_t version;         /**< Archive format version (4 for LZMA, 5 for zlib/LZMA with algo field) */
+    uint8_t version;         /**< Archive format version (4 for LZMA, 5 for zlib/LZMA with algo field, 6 for output directory) */
     uint32_t file_count;     /**< Number of files in the archive */
     uint8_t compression_level; /**< Compression level (0-9) */
     uint8_t compression_algo; /**< Compression algorithm (0 = zlib, 1 = LZMA) */
@@ -54,6 +60,8 @@ typedef struct {
     uint32_t comment_len;    /**< Length of encrypted comment */
     uint8_t salt[SALT_SIZE]; /**< Random salt for PBKDF2 key derivation */
     uint8_t comment[MAX_COMMENT]; /**< Encrypted comment (includes nonce and tag) */
+    uint32_t outdir_len;     /**< Length of encrypted output directory */
+    uint8_t outdir[MAX_OUTDIR]; /**< Encrypted output directory (includes nonce and tag) */
     uint8_t hmac[HMAC_SIZE]; /**< HMAC-SHA256 of header (excluding this field) */
 } ArchiveHeader;
 
@@ -95,6 +103,7 @@ int derive_key(const char *password, const uint8_t *salt, uint8_t *key, const ch
 int compute_hmac(const uint8_t *key, const uint8_t *data, size_t data_len, uint8_t *hmac);
 int has_path_traversal(const char *path);
 int check_password_strength(const char *password, int weak_password);
+int matches_glob_pattern(const char *filename, const char *pattern);
 
 /* Function prototypes from compression.c */
 size_t compress_data(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_max, int level, CompressionAlgo algo);
@@ -108,14 +117,15 @@ int decrypt_aes_gcm(const uint8_t *key, const uint8_t *nonce, const uint8_t *in,
 
 /* Function prototypes from file_ops.c */
 int create_parent_dirs(const char *filepath);
-int collect_files(const char *path, char ***file_list, int *file_count, int max_files);
+int collect_files(const char *path, char ***file_list, int *file_count, int max_files, const char **exclude_patterns, int exclude_pattern_count);
 
 /* Function prototypes from archive.c */
 int archive_files(const char *output, const char **filenames, int file_count, const char *password,
-                 int force, int compression_level, CompressionAlgo compression_algo, const char *comment, int dry_run, int weak_password);
+                 int force, int compression_level, CompressionAlgo compression_algo, const char *comment,
+                 const char *outdir, int dry_run, int weak_password, const char **exclude_patterns, int exclude_pattern_count);
 
 /* Function prototypes from extract.c */
-int extract_files(const char *archive, const char *password, int force);
+int extract_files(const char *archive, const char *password, const char *outdir, int force);
 
 /* Function prototypes from list.c */
 int list_files(const char *archive, const char *password);

@@ -32,8 +32,8 @@ int list_files(const char *archive, const char *password) {
         return 1;
     }
     CompressionAlgo algo;
-    if (strncmp(header.magic, "SLM", 4) != 0 || (header.version < 4 || header.version > 5)) {
-        fprintf(stderr, "Error: Invalid archive format or version (expected 4 or 5, got %d)\n", header.version);
+    if (strncmp(header.magic, "SLM", 4) != 0 || (header.version < 4 || header.version > 6)) {
+        fprintf(stderr, "Error: Invalid archive format or version (expected 4 to 6, got %d)\n", header.version);
         fclose(in);
         return 1;
     }
@@ -78,6 +78,54 @@ int list_files(const char *archive, const char *password) {
         return 1;
     }
     verbose_print(VERBOSE_DEBUG, "Verified header HMAC");
+    if (header.version >= 6 && header.outdir_len > 0) {
+        if (header.outdir_len > MAX_OUTDIR - AES_NONCE_SIZE - AES_TAG_SIZE) {
+            fprintf(stderr, "Error: Invalid output directory length (%u)\n", header.outdir_len);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        uint8_t *dec_outdir = malloc(header.outdir_len + 1);
+        if (!dec_outdir) {
+            fprintf(stderr, "Error: Memory allocation failed for output directory\n");
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        size_t enc_outdir_len = header.outdir_len;
+        const uint8_t *outdir_nonce = header.outdir + enc_outdir_len;
+        const uint8_t *outdir_tag = outdir_nonce + AES_NONCE_SIZE;
+        size_t dec_len;
+        if (decrypt_aes_gcm(meta_key, outdir_nonce, header.outdir, enc_outdir_len, outdir_tag, dec_outdir, &dec_len) != 0) {
+            fprintf(stderr, "Error: Failed to decrypt output directory (possibly incorrect password)\n");
+            free(dec_outdir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        if (dec_len != header.outdir_len) {
+            fprintf(stderr, "Error: Decrypted output directory length mismatch (expected %u, got %lu)\n", header.outdir_len, dec_len);
+            free(dec_outdir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        dec_outdir[dec_len] = '\0';
+        if (has_path_traversal((char *)dec_outdir)) {
+            fprintf(stderr, "Error: Decrypted output directory contains path traversal\n");
+            free(dec_outdir);
+            secure_zero(file_key, AES_KEY_SIZE);
+            secure_zero(meta_key, AES_KEY_SIZE);
+            fclose(in);
+            return 1;
+        }
+        printf("Output directory: %s\n", (char *)dec_outdir);
+        free(dec_outdir);
+    }
     printf("Contents of %s:\n", archive);
     printf("%-11s %-12s %s\n", "Permissions", "Size", "Filename");
     printf("%-11s %-12s %s\n", "-----------", "------------", "--------");
