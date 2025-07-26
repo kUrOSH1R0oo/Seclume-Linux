@@ -42,11 +42,12 @@ void mode_to_string(uint32_t mode, char *str) {
  * @param ... Arguments for format string.
  */
 void verbose_print(VerbosityLevel level, const char *fmt, ...) {
-    if (verbosity < level) return;
+    if (verbosity < level || fmt == NULL) return;
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     fprintf(stderr, "\n");
+    fflush(stderr); // Ensure output is flushed
     va_end(args);
 }
 

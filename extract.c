@@ -191,8 +191,8 @@ int extract_files(const char *archive, const char *password, const char *outdir,
             return 1;
         }
         if (meta_dec_size != sizeof(FileEntryPlain) || plain_entry.filename[MAX_FILENAME - 1] != '\0' ||
-            has_path_traversal(plain_entry.filename) || plain_entry.compressed_size == 0 ||
-            plain_entry.original_size == 0 || plain_entry.original_size > MAX_FILE_SIZE) {
+            has_path_traversal(plain_entry.filename) || (plain_entry.compressed_size > 0 && plain_entry.original_size == 0) ||
+            plain_entry.original_size > MAX_FILE_SIZE) {
             fprintf(stderr, "Error: Invalid or unsafe metadata in file entry %u\n", i);
             free(extract_dir);
             secure_zero(file_key, AES_KEY_SIZE);
@@ -227,6 +227,30 @@ int extract_files(const char *archive, const char *password, const char *outdir,
             secure_zero(meta_key, AES_KEY_SIZE);
             fclose(in);
             return 1;
+        }
+        if (plain_entry.original_size == 0) {
+            verbose_print(VERBOSE_BASIC, "Extracting empty file: %s", full_path);
+            FILE *out = fopen(full_path, "wb");
+            if (!out) {
+                fprintf(stderr, "Error: Cannot open output file %s: %s\n", full_path, strerror(errno));
+                free(full_path);
+                free(extract_dir);
+                secure_zero(file_key, AES_KEY_SIZE);
+                secure_zero(meta_key, AES_KEY_SIZE);
+                fclose(in);
+                return 1;
+            }
+            fclose(out);
+#ifndef _WIN32
+            if (chmod(full_path, plain_entry.mode) != 0) {
+                fprintf(stderr, "Warning: Failed to set permissions on %s: %s\n", full_path, strerror(errno));
+            } else {
+                verbose_print(VERBOSE_DEBUG, "Restored permissions on %s: 0%o", full_path, plain_entry.mode);
+            }
+#endif
+            verbose_print(VERBOSE_BASIC, "Extracted empty file: %s", full_path);
+            free(full_path);
+            continue;
         }
         uint8_t file_nonce[AES_NONCE_SIZE];
         uint8_t file_tag[AES_TAG_SIZE];
